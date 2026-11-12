@@ -38,6 +38,22 @@ jobs:
           link-to-sdk: true
       - name: Install NDK for the JNI build (ndkVersion).
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+      - name: Cache Gradle home.
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-afat-${{ github.run_id }}
+          restore-keys: |
+            gradle-afat-
+      - name: Cache ccache.
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-afat-${{ github.run_id }}
+          restore-keys: |
+            ccache-afat-
       - name: Clone TelegramAndroid and apply patch.
         run: |
           git clone --recurse-submodules --branch dev https://github.com/forkgram/TelegramAndroid.git android
@@ -60,14 +76,27 @@ jobs:
           # RELEASE_KEYSTORE_FILE is intentionally not set.
           vars=gradle.properties
           echo "org.gradle.workers.max=1" >> $vars
+          echo "org.gradle.caching=true" >> $vars
           echo "APP_ID=${APP_ID:-4}" >> $vars
           echo "APP_HASH=${APP_HASH:-014b35b6184100b085b0d0572f9b5103}" >> $vars
 
           sudo apt update
-          sudo apt -y install ninja-build meson nasm gperf pkg-config unzip pip
+          sudo apt -y install ninja-build meson nasm gperf pkg-config unzip pip ccache
           rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
           rustup toolchain install 1.96.1 -t aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+          # Route the CMake native build through ccache (restored above).
+          # The launcher args are injected into the pinned tree only; the
+          # grep makes a silent sed no-match fail the step instead of
+          # quietly building uncached.
+          export CCACHE_DIR="$HOME/.ccache"
+          ccache --max-size=5G
+          ccache --zero-stats
+          sed -i "s/'-DANDROID_PLATFORM=android-23'/'-DANDROID_PLATFORM=android-23', '-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'/" TMessagesProj/build.gradle
+          grep -q "CMAKE_CXX_COMPILER_LAUNCHER=ccache" TMessagesProj/build.gradle
+
           ./gradlew :TMessagesProj_App:assembleAfatRelease
+          ccache --show-stats
 
           grep VERSION_NAME TMessagesProj/build/generated/source/buildConfig/release/org/telegram/messenger/BuildConfig.java | cut -d'"' -f 2 > ../ver.txt
           mkdir -p ../artifact
