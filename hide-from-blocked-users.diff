@@ -1,0 +1,215 @@
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/FilterUtils.kt b/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/FilterUtils.kt
+new file mode 100644
+index 0000000..1bfc089
+--- /dev/null
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/FilterUtils.kt
+@@ -0,0 +1,67 @@
++package org.telegram.messenger.forkgram
++
++import org.telegram.messenger.MessageObject
++import org.telegram.messenger.MessagesController
++import org.telegram.tgnet.TLRPC
++
++/**
++ * Android counterpart of the desktop forkgram/filter_utils.h from
++ * forkgram/tdesktop PR #183 ("Hide msg in group from blocked users").
++ *
++ * Checks if a message is from a blocked user. Used to hide messages
++ * from blocked users in group chats. Does NOT hide messages in the
++ * blocked user's own chat dialog.
++ */
++object FilterUtils {
++
++    const val PREF_HIDE_FROM_BLOCKED_USERS = "hideFromBlockedUsers"
++
++    @JvmStatic
++    fun isFromBlockedUser(currentAccount: Int, messageObject: MessageObject?): Boolean {
++        if (messageObject == null || messageObject.messageOwner == null) {
++            return false
++        }
++        // Check if the feature is enabled.
++        if (!MessagesController.getGlobalMainSettings().getBoolean(PREF_HIDE_FROM_BLOCKED_USERS, false)) {
++            return false
++        }
++
++        // Don't hide our own messages.
++        if (messageObject.isOut) {
++            return false
++        }
++
++        val message = messageObject.messageOwner
++
++        // Don't hide messages in the blocked user's own chat.
++        // Otherwise the dialog would be empty.
++        val fromId = message.from_id
++        if (fromId is TLRPC.TL_peerUser && fromId.user_id != 0L &&
++            fromId.user_id == messageObject.dialogId
++        ) {
++            return false
++        }
++
++        val controller = MessagesController.getInstance(currentAccount)
++
++        // Check if the sender is blocked.
++        if (fromId is TLRPC.TL_peerUser && fromId.user_id != 0L &&
++            controller.blockePeers.indexOfKey(fromId.user_id) >= 0
++        ) {
++            return true
++        }
++
++        // For forwarded messages, check the original sender.
++        val fwdFrom = message.fwd_from
++        if (fwdFrom != null) {
++            val originalId = fwdFrom.from_id
++            if (originalId is TLRPC.TL_peerUser && originalId.user_id != 0L &&
++                controller.blockePeers.indexOfKey(originalId.user_id) >= 0
++            ) {
++                return true
++            }
++        }
++
++        return false
++    }
++}
+diff --git a/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/ForkSettings.kt b/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/ForkSettings.kt
+index d767163..3c48f67 100644
+--- a/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/ForkSettings.kt
++++ b/TMessagesProj/src/main/java/org/telegram/messenger/forkgram/ForkSettings.kt
+@@ -165,6 +165,7 @@ object ForkSettings {
+         BoolOption("replaceForward", ForkSettingsActivity.ID_REPLACE_FORWARD, true),
+         BoolOption("mentionByName", ForkSettingsActivity.ID_MENTION_BY_NAME, false),
+         BoolOption("hideSendAs", ForkSettingsActivity.ID_HIDE_SEND_AS, false),
++        BoolOption("hideFromBlockedUsers", ForkSettingsActivity.ID_HIDE_FROM_BLOCKED_USERS, false),
+         BoolOption("disableLinkPreviewByDefault", ForkSettingsActivity.ID_DISABLE_LINK_PREVIEW_BY_DEFAULT, false),
+         BoolOption("addItemToDeleteAllUnpinnedMessages", ForkSettingsActivity.ID_DELETE_ALL_UNPINNED, false),
+         BoolOption("disableSlideToNextChannel", ForkSettingsActivity.ID_DISABLE_SLIDE_TO_NEXT_CHANNEL, false),
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
+index be9667d..fc079a5 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/Cells/ChatMessageCell.java
+@@ -283,6 +283,16 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+     private boolean flipImage;
+     private boolean visibleOnScreen = true;
+     public boolean shouldCheckVisibleOnScreen;
++    // Fork: set only by ChatActivity's chat adapter. When true, messages from
++    // blocked users are collapsed to zero height (see FilterUtils), mirroring
++    // Element::isHidden() in forkgram/tdesktop PR #183.
++    public boolean hideFromBlockedUsersFilter;
++    private boolean hiddenByBlockedFilter;
++
++    public boolean isHiddenByBlockedFilter() {
++        return hiddenByBlockedFilter;
++    }
++
+     public float parentBoundsTop;
+     public int parentBoundsBottom;
+ 
+@@ -6255,6 +6265,7 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+     public MultiLayoutTypingAnimator botDraftTypingAnimator;
+ 
+     private void setMessageContent(MessageObject messageObject, MessageObject.GroupedMessages groupedMessages, boolean bottomNear, boolean topNear, boolean firstInChat, boolean lastInChatList) {
++        hiddenByBlockedFilter = hideFromBlockedUsersFilter && org.telegram.messenger.forkgram.FilterUtils.isFromBlockedUser(currentAccount, messageObject);
+         if (messageObject.checkLayout() || currentPosition != null && lastHeight != AndroidUtilities.displaySize.y) {
+             currentMessageObject = null;
+         }
+@@ -12180,6 +12191,10 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+ 
+     @Override
+     protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
++        if (hiddenByBlockedFilter) {
++            setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), 0);
++            return;
++        }
+         if (currentMessageObject != null && (currentMessageObject.checkLayout() || lastHeight != AndroidUtilities.displaySize.y)) {
+             inLayout = true;
+             MessageObject messageObject = currentMessageObject;
+@@ -17383,6 +17398,9 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+         if (currentMessageObject == null) {
+             return;
+         }
++        if (hiddenByBlockedFilter) {
++            return;
++        }
+         if (!wasLayout) {
+             onLayout(false, getLeft(), getTop(), getRight(), getBottom());
+         }
+@@ -23595,6 +23613,9 @@ public class ChatMessageCell extends BaseCell implements SeekBar.SeekBarDelegate
+     public int computedGroupCaptionY;
+     public MessageObject.TextLayoutBlocks computedCaptionLayout;
+     public int computeHeight(MessageObject object, MessageObject.GroupedMessages groupedMessages, boolean withCaption) {
++        if (hideFromBlockedUsersFilter && org.telegram.messenger.forkgram.FilterUtils.isFromBlockedUser(currentAccount, object)) {
++            return 0;
++        }
+         photoImage.setIgnoreImageSet(true);
+         avatarImage.setIgnoreImageSet(true);
+         replyImageReceiver.setIgnoreImageSet(true);
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+index bad0e53..b1502d7 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ChatActivity.java
+@@ -18133,6 +18133,7 @@ public class ChatActivity extends BaseFragment implements
+         }
+         if (dummyMessageCell == null) {
+             dummyMessageCell = new ChatMessageCell(getParentActivity(), currentAccount, true, sharedResources, themeDelegate);
++            dummyMessageCell.hideFromBlockedUsersFilter = true;
+         }
+         dummyMessageCell.isChat = currentChat != null || UserObject.isUserSelf(currentUser);
+         dummyMessageCell.isSavedChat = chatMode == MODE_SAVED;
+@@ -39144,6 +39145,7 @@ public class ChatActivity extends BaseFragment implements
+             if (viewType == 0) {
+                 view = new ChatMessageCell(mContext, currentAccount, true, sharedResources, themeDelegate);
+                 ChatMessageCell chatMessageCell = (ChatMessageCell) view;
++                chatMessageCell.hideFromBlockedUsersFilter = true;
+                 chatMessageCell.setResourcesProvider(themeDelegate);
+                 chatMessageCell.shouldCheckVisibleOnScreen = false;
+                 chatMessageCell.setDelegate(getChatMessageCellDelegate());
+diff --git a/TMessagesProj/src/main/java/org/telegram/ui/ForkSettingsActivity.java b/TMessagesProj/src/main/java/org/telegram/ui/ForkSettingsActivity.java
+index 1ac7de3..df39b8a 100644
+--- a/TMessagesProj/src/main/java/org/telegram/ui/ForkSettingsActivity.java
++++ b/TMessagesProj/src/main/java/org/telegram/ui/ForkSettingsActivity.java
+@@ -115,6 +115,7 @@ public class ForkSettingsActivity extends BaseFragment {
+     public static final int ID_DISABLE_SLIDE_TO_NEXT_CHANNEL = 35;
+     public static final int ID_FORMAT_WITH_SECONDS = 36;
+     public static final int ID_HIDE_AI_EDITOR = 37;
++    public static final int ID_HIDE_FROM_BLOCKED_USERS = 47;
+     public static final int ID_FORMATTING_MENU = 38;
+     public static final int ID_LINK_REPLACEMENTS = 39;
+ 
+@@ -640,6 +641,8 @@ public class ForkSettingsActivity extends BaseFragment {
+             .setChecked(pref("mentionByName", false)).setMultiline(true));
+         items.add(UItem.asButtonCheck(ID_HIDE_SEND_AS, LocaleController.getString(R.string.HideSendAs), LocaleController.getString(R.string.HideSendAsInfo))
+             .setChecked(pref("hideSendAs", false)).setMultiline(true));
++        items.add(UItem.asButtonCheck(ID_HIDE_FROM_BLOCKED_USERS, LocaleController.getString(R.string.HideFromBlockedUsers), LocaleController.getString(R.string.HideFromBlockedUsersInfo))
++            .setChecked(pref("hideFromBlockedUsers", false)).setMultiline(true));
+         items.add(UItem.asButtonCheck(ID_DISABLE_LINK_PREVIEW_BY_DEFAULT, LocaleController.getString(R.string.DisableLinkPreviewByDefault), LocaleController.getString(R.string.DisableLinkPreviewByDefaultInfo))
+             .setChecked(pref("disableLinkPreviewByDefault", false)).setMultiline(true));
+         items.add(UItem.asButtonCheck(ID_DELETE_ALL_UNPINNED, LocaleController.getString(R.string.AddDeleteAllUnpinnedMessages), LocaleController.getString(R.string.AddDeleteAllUnpinnedMessagesInfo))
+@@ -855,6 +858,8 @@ public class ForkSettingsActivity extends BaseFragment {
+             toggle("mentionByName", item, view);
+         } else if (id == ID_HIDE_SEND_AS) {
+             toggle("hideSendAs", item, view);
++        } else if (id == ID_HIDE_FROM_BLOCKED_USERS) {
++            toggle("hideFromBlockedUsers", item, view);
+         } else if (id == ID_DISABLE_LINK_PREVIEW_BY_DEFAULT) {
+             toggle("disableLinkPreviewByDefault", item, view);
+         } else if (id == ID_DELETE_ALL_UNPINNED) {
+diff --git a/TMessagesProj/src/main/res/values/strings.xml b/TMessagesProj/src/main/res/values/strings.xml
+index 318fcb4..9513102 100644
+--- a/TMessagesProj/src/main/res/values/strings.xml
++++ b/TMessagesProj/src/main/res/values/strings.xml
+@@ -30,6 +30,7 @@
+     <string name="ReplaceForwardInfo">Forward opens the share sheet instead of the chat picker.</string>
+     <string name="MentionByNameInfo">Autocomplete inserts the person name instead of the username.</string>
+     <string name="HideSendAsInfo">Hide the send-as avatar button in the message field.</string>
++    <string name="HideFromBlockedUsersInfo">Do not show messages from users you have blocked in group chats. Messages in the blocked user\'s own chat remain visible.</string>
+     <string name="DisableLinkPreviewByDefaultInfo">Send messages containing links without a preview attached.</string>
+     <string name="DisableSlideToNextChannelInfo">Do not slide to the next channel when scrolling past the end.</string>
+     <string name="FormatWithSecondsInfo">Show seconds in message timestamps and other times.</string>
+@@ -109,6 +110,7 @@
+     <string name="ShowArchivedStickers">Show Archived Sticker Packs</string>
+     <string name="ShowArchivedStickersInfo">Display sticker packs archived by Telegram\'s 200-pack limit in the sticker panel. Packs stay archived and load on demand.</string>
+     <string name="HideSendAs">Hide \"Send as\" button</string>
++    <string name="HideFromBlockedUsers">Hide messages from blocked users</string>
+     <string name="ShowNotificationContent">Show Notifications content</string>
+     <string name="ShowNotificationContentInfo">When app is locked. Can be cause of privacy leaks.</string>
+     <string name="DeleteAllYourMessages">Delete all your messages</string>

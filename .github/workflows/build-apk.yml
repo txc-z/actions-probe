@@ -1,0 +1,87 @@
+name: Build ForkClient APK (hide-from-blocked)
+
+# Builds forkgram/TelegramAndroid at a pinned commit with
+# hide-from-blocked-users.diff applied (port of forkgram/tdesktop PR #183:
+# hide messages from blocked users in group chats). The APK is published
+# as a release asset of THIS repository.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/build-apk.yml
+      - hide-from-blocked-users.diff
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Free up some disk space.
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be
+        with:
+          tool-cache: false
+          android: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: nttld/setup-ndk@v1.4.2
+        id: setup-ndk-r27c
+        with:
+          ndk-version: r27c
+          link-to-sdk: true
+      - name: Install NDK for the JNI build (ndkVersion).
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018"
+      - name: Clone TelegramAndroid and apply patch.
+        run: |
+          git clone --recurse-submodules --branch dev https://github.com/forkgram/TelegramAndroid.git android
+          cd android
+          git checkout 56e6bbeae0d06ac4e806047297b02d98282afe14
+          git submodule update --init --recursive
+          git apply --check ../hide-from-blocked-users.diff
+          git apply ../hide-from-blocked-users.diff
+          git diff --stat
+      - name: Build.
+        working-directory: android
+        run: |
+          # Use the public sample API credentials that BuildVars.java itself
+          # carries as fallback (APP_ID=4). No repo secrets are required.
+          # Signing falls back to TMessagesProj/config/test.keystore because
+          # RELEASE_KEYSTORE_FILE is intentionally not set.
+          vars=gradle.properties
+          echo "org.gradle.workers.max=1" >> $vars
+          echo "APP_ID=4" >> $vars
+          echo "APP_HASH=014b35b6184100b085b0d0572f9b5103" >> $vars
+
+          sudo apt update
+          sudo apt -y install ninja-build meson nasm gperf pkg-config unzip pip
+          rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+          rustup toolchain install 1.96.1 -t aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+          ./gradlew :TMessagesProj_App:assembleAfatRelease
+
+          grep VERSION_NAME TMessagesProj/build/generated/source/buildConfig/release/org/telegram/messenger/BuildConfig.java | cut -d'"' -f 2 > ../ver.txt
+          mkdir -p ../artifact
+          mv TMessagesProj_App/build/outputs/apk/afat/release/app.apk ../app.apk
+          cp ../app.apk "../artifact/ForkClient $(cat ../ver.txt) hide-blocked.apk"
+          ls -la ../artifact
+      - name: Upload artifact.
+        uses: actions/upload-artifact@v4
+        with:
+          name: forkclient-apk
+          path: artifact/
+          if-no-files-found: error
+      - name: Publish release with APK.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="hide-blocked-$(date +%Y%m%d)-${GITHUB_SHA::7}"
+          echo "Publishing release $tag"
+          gh release create "$tag" artifact/*.apk \
+            --title "ForkClient with hide-from-blocked-users ($tag)" \
+            --notes "ForkClient 13.2.3 (forkgram/TelegramAndroid dev 56e6bbe) + hide messages from blocked users in groups (port of forkgram/tdesktop PR #183). Enable in Fork Settings > Chats > Hide messages from blocked users. Built with the public sample API_ID=4 and signed with the in-repo test keystore, so it cannot update over an official ForkClient install; uninstall any existing copy first or use it standalone."
