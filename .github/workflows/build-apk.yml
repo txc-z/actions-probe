@@ -49,15 +49,19 @@ jobs:
           git diff --stat
       - name: Build.
         working-directory: android
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_HASH: ${{ secrets.APP_HASH }}
         run: |
-          # Use the public sample API credentials that BuildVars.java itself
-          # carries as fallback (APP_ID=4). No repo secrets are required.
+          # API credentials come from this repo's Actions secrets
+          # (APP_ID / APP_HASH); without them, fall back to the public
+          # sample credentials that BuildVars.java itself carries (APP_ID=4).
           # Signing falls back to TMessagesProj/config/test.keystore because
           # RELEASE_KEYSTORE_FILE is intentionally not set.
           vars=gradle.properties
           echo "org.gradle.workers.max=1" >> $vars
-          echo "APP_ID=4" >> $vars
-          echo "APP_HASH=014b35b6184100b085b0d0572f9b5103" >> $vars
+          echo "APP_ID=${APP_ID:-4}" >> $vars
+          echo "APP_HASH=${APP_HASH:-014b35b6184100b085b0d0572f9b5103}" >> $vars
 
           sudo apt update
           sudo apt -y install ninja-build meson nasm gperf pkg-config unzip pip
@@ -84,4 +88,4 @@ jobs:
           echo "Publishing release $tag"
           gh release create "$tag" artifact/*.apk \
             --title "ForkClient with hide-from-blocked-users ($tag)" \
-            --notes "ForkClient 13.2.3 (forkgram/TelegramAndroid dev 56e6bbe) + hide messages from blocked users in groups (port of forkgram/tdesktop PR #183). Enable in Fork Settings > Chats > Hide messages from blocked users. Built with the public sample API_ID=4 and signed with the in-repo test keystore, so it cannot update over an official ForkClient install; uninstall any existing copy first or use it standalone."
+            --notes "ForkClient 13.2.3 (forkgram/TelegramAndroid dev 56e6bbe) + hide messages from blocked users in groups (port of forkgram/tdesktop PR #183). Enable in Fork Settings > Chats > Hide messages from blocked users. Signed with the in-repo test keystore, so it cannot update over an official ForkClient install; uninstall any existing copy first or use it standalone."
